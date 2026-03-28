@@ -79,6 +79,16 @@ class MCPConfigHandler(idaapi.action_handler_t):
         self.plugin.port = port
         print(f"[MCP] Configuration updated: {host}:{port}")
 
+        # Persist bind host so /config.html stays in sync
+        try:
+            if TYPE_CHECKING:
+                from .ida_mcp.http import config_json_set
+            else:
+                from ida_mcp.http import config_json_set
+            config_json_set("bind_host", host)
+        except Exception:
+            pass
+
         # Apply new endpoint immediately if the server is running.
         if self.plugin.mcp is not None:
             print("[MCP] Applying configuration change without manual restart...")
@@ -120,6 +130,18 @@ class MCP(idaapi.plugin_t):
         self.mcp: "ida_mcp.rpc.McpServer | None" = None
         self.host = self.DEFAULT_HOST
         self.port = self.DEFAULT_PORT
+
+        # Load persisted bind host from IDB config (set via /config.html)
+        try:
+            if TYPE_CHECKING:
+                from .ida_mcp.http import config_json_get
+            else:
+                from ida_mcp.http import config_json_get
+            stored_host = config_json_get("bind_host", None)
+            if stored_host:
+                self.host = stored_host
+        except Exception:
+            pass
 
         # Register a separate menu item for host/port configuration
         ida_kernwin.register_action(

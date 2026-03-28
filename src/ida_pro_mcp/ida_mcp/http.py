@@ -67,15 +67,25 @@ def handle_enabled_tools(registry: McpRpcRegistry, config_key: str):
 DEFAULT_CORS_POLICY = "local"
 
 
+DEFAULT_BIND_HOST = "127.0.0.1"
+
+
 def get_cors_policy(port: int) -> str:
     """Retrieve the current CORS policy from configuration."""
+    bind_host = config_json_get("bind_host", DEFAULT_BIND_HOST)
+    extra = set()
+    if bind_host not in ("127.0.0.1", "localhost", "0.0.0.0", "::"):
+        extra.add(bind_host)
     match config_json_get("cors_policy", DEFAULT_CORS_POLICY):
         case "unrestricted":
             return "*"
         case "local":
-            return "127.0.0.1 localhost"
+            hosts = "127.0.0.1 localhost"
+            return f"{hosts} {' '.join(extra)}" if extra else hosts
         case "direct":
-            return f"http://127.0.0.1:{port} http://localhost:{port}"
+            origins = [f"http://127.0.0.1:{port}", f"http://localhost:{port}"]
+            origins.extend(f"http://{h}:{port}" for h in extra)
+            return " ".join(origins)
         case _:
             return "*"
 
@@ -88,12 +98,20 @@ class IdaMcpHttpRequestHandler(McpHttpRequestHandler):
         super().__init__(request, client_address, server)
         self.update_cors_policy()
 
+    def _cors_local(self, origin: str) -> bool:
+        """Allow CORS from localhost and the bound host on any port."""
+        allowed = {"localhost", "127.0.0.1", "::1"}
+        h = self.bound_host
+        if h not in ("0.0.0.0", "::"):
+            allowed.add(h)
+        return urlparse(origin).hostname in allowed
+
     def update_cors_policy(self):
         match config_json_get("cors_policy", DEFAULT_CORS_POLICY):
             case "unrestricted":
                 self.mcp_server.cors_allowed_origins = "*"
             case "local":
-                self.mcp_server.cors_allowed_origins = self.mcp_server.cors_localhost
+                self.mcp_server.cors_allowed_origins = self._cors_local
             case "direct":
                 self.mcp_server.cors_allowed_origins = None
 
@@ -159,6 +177,20 @@ class IdaMcpHttpRequestHandler(McpHttpRequestHandler):
     def server_port(self) -> int:
         return cast(HTTPServer, self.server).server_port
 
+    @property
+    def bound_host(self) -> str:
+        """The address the server is actually bound to."""
+        addr = cast(HTTPServer, self.server).server_address[0]
+        return str(addr)
+
+    def _allowed_hosts(self) -> set[str]:
+        """Hostnames accepted by origin / host header checks."""
+        hosts = {"127.0.0.1", "localhost"}
+        h = self.bound_host
+        if h not in ("0.0.0.0", "::"):
+            hosts.add(h)
+        return hosts
+
     def _check_origin(self) -> bool:
         """
         Prevents CSRF and DNS rebinding attacks by ensuring POST requests
@@ -166,7 +198,8 @@ class IdaMcpHttpRequestHandler(McpHttpRequestHandler):
         """
         origin = self.headers.get("Origin")
         port = self.server_port
-        if origin not in (f"http://127.0.0.1:{port}", f"http://localhost:{port}"):
+        allowed = {f"http://{h}:{port}" for h in self._allowed_hosts()}
+        if origin not in allowed:
             self.send_error(403, "Invalid Origin")
             return False
         return True
@@ -178,7 +211,8 @@ class IdaMcpHttpRequestHandler(McpHttpRequestHandler):
         """
         host = self.headers.get("Host")
         port = self.server_port
-        if host not in (f"127.0.0.1:{port}", f"localhost:{port}"):
+        allowed = {f"{h}:{port}" for h in self._allowed_hosts()}
+        if host not in allowed:
             self.send_error(403, "Invalid Host")
             return False
         return True
@@ -337,6 +371,18 @@ input[type="submit"]:hover {
         for value, label, tooltip in cors_options:
             checked = "checked" if cors_policy == value else ""
             body += f'<label><input type="radio" name="cors_policy" value="{html.escape(value)}" {checked}><span class="tooltip" title="{html.escape(tooltip)}">{html.escape(label)}</span></label>'
+
+        bind_host = config_json_get("bind_host", DEFAULT_BIND_HOST)
+        body += "<h2>Bind Address</h2>"
+        body += '<p style="font-size: 0.85rem; margin: 0.25rem 0 0.5rem;">'
+        body += 'Address the server listens on. Use <code>127.0.0.1</code> for localhost only, '
+        body += 'a LAN IP for remote access, or <code>0.0.0.0</code> for all interfaces. '
+        body += '<strong>Applied on next server restart.</strong></p>'
+        body += f'<label style="display:inline-flex;align-items:center;gap:0.5rem;">'
+        body += f'<input type="text" name="bind_host" value="{html.escape(bind_host)}" '
+        body += 'style="padding:0.3rem 0.5rem;border:1px solid var(--border);border-radius:4px;'
+        body += 'background:var(--bg);color:var(--text);font-family:monospace;"></label>'
+
         body += "<br><input type='submit' value='Save'>"
 
         quick_select = """<p style="font-size: 0.9rem; margin: 0.5rem 0;">
@@ -377,6 +423,13 @@ input[type="submit"]:hover {
         cors_policy = postvars.get("cors_policy", [DEFAULT_CORS_POLICY])[0]
         config_json_set("cors_policy", cors_policy)
         self.update_cors_policy()
+
+        # Update bind host (applied on next server restart)
+        bind_host = postvars.get("bind_host", [DEFAULT_BIND_HOST])[0].strip()
+        if not re.match(r"^[\w\.\:\-]+$", bind_host):
+            self.send_error(400, "Invalid bind host")
+            return
+        config_json_set("bind_host", bind_host)
 
         # Update the server's tools
         enabled_tools = {name: name in postvars for name in ORIGINAL_TOOLS.keys()}
