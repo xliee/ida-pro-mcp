@@ -174,6 +174,15 @@ class MCP(idaapi.plugin_t):
         except Exception as e:
             print(f"[MCP] Cache init failed: {e}")
 
+        # Re-read persisted bind host (may have been changed via /config.html)
+        try:
+            from ida_mcp.http import config_json_get
+            stored_host = config_json_get("bind_host", None)
+            if stored_host:
+                self.host = stored_host
+        except Exception:
+            pass
+
         port = self.port
         max_port = port + 100
         while port < max_port:
